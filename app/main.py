@@ -6,18 +6,21 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-from .errors import DemuxError
+from .errors import DemuxError, TrimmingError
 from .jobs import (
     MAX_PARALLEL_JOBS,
     JobManager,
 )
+from .trim_jobs import TrimManager
+from .trimming import validate_params
 
 BASE_DIR = Path(__file__).resolve().parent
 JOBS_ROOT = Path(os.environ.get("DEMUX_JOBS_ROOT", "/data/jobs"))
+TRIM_ROOT = Path(os.environ.get("DEMUX_TRIM_ROOT", "/data/trimming"))
 LANES = ("R1", "R2", "I1", "I2")
 SHEET_FIELD = "sample_sheet"
 
@@ -25,12 +28,14 @@ SHEET_FIELD = "sample_sheet"
 async def lifespan(_app: FastAPI):
     # Task state lives in memory only; start every run with a clean disk.
     manager.wipe()
+    trim_manager.wipe()
     yield
 
 
 app = FastAPI(title="FASTQ Demultiplexer", version="1.0.0", lifespan=lifespan)
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 manager = JobManager(JOBS_ROOT)
+trim_manager = TrimManager(TRIM_ROOT, manager)
 
 
 # ---------------------------------------------------------------- helpers
@@ -161,3 +166,102 @@ async def download_job(job_id: str) -> FileResponse:
 async def demux_error_handler(_request: Request, exc: DemuxError) -> JSONResponse:
     # Pipeline errors are recorded on the job; this is a defensive fallback.
     return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+# ------------------------------------------------------------- trimming
+
+
+@app.get("/api/trimming/targets")
+async def list_trim_targets() -> dict[str, list[dict]]:
+    """Non-empty samples of completed batches, with their trimming state."""
+    return {"targets": trim_manager.list_targets()}
+
+
+@app.post("/api/trimming", status_code=201)
+async def create_trimming(
+    job_id: str = Form(...),
+    sample_id: str = Form(...),
+    adapter_r1: str = Form(...),
+    adapter_r2: str = Form(...),
+    min_length: int = Form(...),
+) -> JSONResponse:
+    # A resubmission for the same sample must always be accepted; validation
+    # failures are 400, an unknown/empty target is 404.
+    try:
+        params = validate_params(adapter_r1, adapter_r2, min_length)
+    except TrimmingError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        trim_manager.resolve_target(job_id, sample_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    attempt = trim_manager.submit(job_id, sample_id, params)
+    return JSONResponse(status_code=201, content=trim_manager._decorate(attempt))
+
+
+@app.get("/api/trimming")
+async def list_trimming() -> dict[str, list[dict]]:
+    return {"attempts": trim_manager.list_attempts()}
+
+
+@app.get("/api/trimming/{attempt_id}")
+async def get_trimming(attempt_id: str) -> dict:
+    found = trim_manager.get_attempt(attempt_id)
+    if found is None:
+        raise HTTPException(
+            status_code=404, detail="trimming attempt not found (state is memory-only)"
+        )
+    return trim_manager._decorate(found[0])
+
+
+@app.post("/api/trimming/{attempt_id}/cancel")
+def cancel_trimming(attempt_id: str) -> dict:
+    # Defined as a sync route on purpose: cancellation waits for the real
+    # cutadapt process group to exit and the temp directory to be removed.
+    # FastAPI runs sync routes in its threadpool, so the wait never blocks
+    # the event loop, other samples or the demultiplex service.
+    try:
+        attempt = trim_manager.cancel(attempt_id)
+    except TimeoutError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if attempt is None:
+        raise HTTPException(
+            status_code=404, detail="trimming attempt not found (state is memory-only)"
+        )
+    found = trim_manager.get_attempt(attempt_id)
+    assert found is not None
+    return trim_manager._decorate(found[0])
+
+
+@app.get("/api/trimming/{attempt_id}/download")
+async def download_trimming(attempt_id: str) -> StreamingResponse:
+    try:
+        fh, filename = trim_manager.open_published_zip(attempt_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "no download available: only the published, fully completed "
+                f"attempt serves a ZIP ({exc})"
+            ),
+        ) from exc
+
+    def _iterfile():
+        try:
+            while True:
+                chunk = fh.read(1024 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            # The fd stays open for the whole download even if the attempt
+            # is superseded and its directory removed meanwhile.
+            fh.close()
+
+    return StreamingResponse(
+        _iterfile(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

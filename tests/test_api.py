@@ -20,20 +20,6 @@ from app.pipeline import Progress, run_demux
 SAMPLES_DIR = Path(__file__).resolve().parent.parent / "samples"
 
 
-@pytest.fixture(scope="module")
-def client(tmp_path_factory):
-    jobs_root = tmp_path_factory.mktemp("jobs")
-    os.environ["DEMUX_JOBS_ROOT"] = str(jobs_root)
-    # Reload the module-level manager path.
-    from app import main as main_module
-
-    main_module.JOBS_ROOT = jobs_root
-    main_module.manager = main_module.JobManager(jobs_root)
-    main_module.manager.wipe()
-    with TestClient(app) as c:
-        yield c
-
-
 def _files_for(dataset: str) -> dict[str, bytes]:
     base = SAMPLES_DIR / dataset
     return {

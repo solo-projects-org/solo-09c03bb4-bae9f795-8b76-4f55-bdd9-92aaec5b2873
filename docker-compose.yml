@@ -6,11 +6,14 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Job state is memory-only; this volume only holds transient uploads,
-      # per-job gzip outputs and the published ZIP.  It is wiped on startup.
+      # Job state is memory-only; these volumes only hold transient uploads,
+      # per-job gzip outputs, trimming attempt directories and published ZIPs.
+      # Both are wiped on startup.
       - demux-jobs:/data/jobs
+      - demux-trimming:/data/trimming
     environment:
       DEMUX_JOBS_ROOT: /data/jobs
+      DEMUX_TRIM_ROOT: /data/trimming
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status==200 else 1)"]
@@ -21,3 +24,4 @@ services:
 
 volumes:
   demux-jobs:
+  demux-trimming:

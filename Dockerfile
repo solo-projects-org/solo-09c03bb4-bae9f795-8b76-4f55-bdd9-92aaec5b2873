@@ -3,7 +3,8 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    DEMUX_JOBS_ROOT=/data/jobs
+    DEMUX_JOBS_ROOT=/data/jobs \
+    DEMUX_TRIM_ROOT=/data/trimming
 
 WORKDIR /app
 
@@ -14,7 +15,7 @@ COPY app ./app
 COPY samples ./samples
 COPY scripts ./scripts
 
-RUN mkdir -p /data/jobs && useradd --create-home --uid 10001 appuser \
+RUN mkdir -p /data/jobs /data/trimming && useradd --create-home --uid 10001 appuser \
     && chown -R appuser:appuser /data /app
 USER appuser
 

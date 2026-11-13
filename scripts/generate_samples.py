@@ -1,6 +1,6 @@
 """Generate the bundled demo datasets for the web UI.
 
-Three datasets are produced, each with the four lanes
+Four datasets are produced, each with the four lanes
 (R1/R2/I1/I2 .fastq.gz) and a samples.csv:
 
 * normal    - every read matches a unique sample (perfect or 1 mismatch)
@@ -10,6 +10,10 @@ Three datasets are produced, each with the four lanes
 * corrupt   - same content as normal but the R2 gzip stream is truncated
               at its tail, so the CRC / ISIZE check fails and the whole
               batch fails.
+* trimming  - reads whose R1/R2 carry known 3' library adapters, including
+              full adapters, an internal adapter, an overtrimmed short pair
+              and an undetermined read, so the cutadapt trimming page can be
+              exercised end to end.
 
 The sample sheet is chosen so that sampleA and sampleB differ at exactly
 two positions on both index ends; flipping one of those positions yields a
@@ -33,6 +37,11 @@ SAMPLE_SHEET = [
     ("sampleB", "ATCGTGAA", "ATCGTGAA"),  # 2 flips vs A on each end
     ("sampleC", "GCTACGAA", "TTACGCAG"),
 ]
+
+# Known 3' library adapters used by the trimming demo.  Submit these on the
+# trimming page together with min_length=10.
+TRIM_ADAPTER_R1 = "AGATCGGAAGAG"          # 12 bp, 3' adapter of R1
+TRIM_ADAPTER_R2 = "CTGTCTCTTATA"          # 12 bp, 3' adapter of R2
 
 
 def _record(name: str, seq: str) -> bytes:
@@ -123,17 +132,96 @@ def corrupt_dataset(out_dir: str, normal_dir: str) -> None:
         fh.write(data[:-9])
 
 
+def trimming_dataset(out_dir: str) -> None:
+    """Build a batch whose R1/R2 reads embed known 3' adapters.
+
+    Submit adapters ``TRIM_ADAPTER_R1`` / ``TRIM_ADAPTER_R2`` with
+    ``min_length=10`` on the trimming page:
+
+    * SEQ-0001 (sampleA): no adapter, full 20 bp kept
+    * SEQ-0002 (sampleA): full adapters on both ends, 12 bp insert kept
+    * SEQ-0003 (sampleB): 8 bp biological bases then adapters -> trimming
+      leaves 8 bp, below the minimum, the whole pair is filtered out
+    * SEQ-0004 (sampleB): adapter sequence appears inside the read; the 3'
+      suffix from the adapter onward is removed
+    * SEQ-0005 (sampleC): R1 has its adapter, R2 has none
+    * SEQ-0006 (sampleC): partial adapter ligation (6 of 12 bp) which the
+      default overlap rule still recognises
+    * SEQ-0007: indices match no sample -> undetermined, but its reads are
+      still trimmable
+    """
+    a7, a5 = SAMPLE_SHEET[0][1], SAMPLE_SHEET[0][2]
+    b7, b5 = SAMPLE_SHEET[1][1], SAMPLE_SHEET[1][2]
+    c7, c5 = SAMPLE_SHEET[2][1], SAMPLE_SHEET[2][2]
+    index_pairs = [
+        (a7, a5),                                  # 1 -> sampleA
+        (a7, a5),                                  # 2 -> sampleA
+        (b7, b5),                                  # 3 -> sampleB (filtered)
+        (b7, b5),                                  # 4 -> sampleB
+        (c7, c5),                                  # 5 -> sampleC
+        (c7, c5),                                  # 6 -> sampleC
+        ("GGGGGGGG", "CCCCCCCC"),                  # 7 -> undetermined
+    ]
+    names = _read_names(len(index_pairs))
+    r1, r2, i1, i2 = [], [], [], []
+
+    def rec(name: str, seq: str) -> bytes:
+        return _record(name, seq)
+
+    reads = [
+        # (R1 sequence, R2 sequence)
+        ("AAAACCCCGGGGTTTTAA", "TTTTGGGGCCCCAAAATT"),                       # 1 clean
+        ("AAAACCCCAAAA" + TRIM_ADAPTER_R1,
+         "TTTTGGGGTTTT" + TRIM_ADAPTER_R2),                                 # 2 full adapters
+        ("AAAACCCC" + TRIM_ADAPTER_R1,
+         "TTTTGGGG" + TRIM_ADAPTER_R2),                                     # 3 too short after trim
+        ("AAAACCCCGGGGTT" + TRIM_ADAPTER_R1 + "GGGG",
+         "TTTTGGGGCCCCAA" + TRIM_ADAPTER_R2 + "CCCC"),                      # 4 internal adapter
+        ("AAAACCCCGGGG" + TRIM_ADAPTER_R1,
+         "TTTTGGGGCCCCAAAATT"),                                             # 5 R1 only
+        ("AAAACCCCAAAAAA" + TRIM_ADAPTER_R1[:6],
+         "TTTTGGGGTTTTTT" + TRIM_ADAPTER_R2[:6]),                           # 6 partial ligation
+        ("NNNNAAAACCCC" + TRIM_ADAPTER_R1,
+         "NNNNTTTTGGGG" + TRIM_ADAPTER_R2),                                 # 7 undetermined
+    ]
+    for idx, (name, (i7, i5)) in enumerate(zip(names, index_pairs), start=1):
+        base = name.split(" ")[0], name.split(" ", 1)[1]
+        r1seq, r2seq = reads[idx - 1]
+        r1.append(rec(f"{base[0]}/1 {base[1]}", r1seq))
+        r2.append(rec(f"{base[0]}/2 {base[1]}", r2seq))
+        i1.append(rec(name, i7))
+        i2.append(rec(name, i5))
+
+    _write_lane(os.path.join(out_dir, "R1.fastq.gz"), r1)
+    _write_lane(os.path.join(out_dir, "R2.fastq.gz"), r2)
+    _write_lane(os.path.join(out_dir, "I1.fastq.gz"), i1)
+    _write_lane(os.path.join(out_dir, "I2.fastq.gz"), i2)
+    _write_sheet(out_dir)
+
+    with open(os.path.join(out_dir, "TRIMMING_README.txt"), "w", encoding="utf-8") as fh:
+        fh.write(
+            "Adapter trimming demo parameters (cutadapt -j 2, default matching):\n"
+            f"  adapter_r1 = {TRIM_ADAPTER_R1}\n"
+            f"  adapter_r2 = {TRIM_ADAPTER_R2}\n"
+            "  min_length = 10\n"
+            "Expected: SEQ-0003 pair is filtered (8 bp insert on both ends);\n"
+            "all other pairs survive with their 3' adapters removed.\n"
+        )
+
+
 def main(root: str) -> None:
     if os.path.isdir(root):
         shutil.rmtree(root)
     normal_dir = os.path.join(root, "normal")
     ambiguous_dir = os.path.join(root, "ambiguous")
     corrupt_dir = os.path.join(root, "corrupt")
-    for d in (normal_dir, ambiguous_dir, corrupt_dir):
+    trimming_dir = os.path.join(root, "trimming")
+    for d in (normal_dir, ambiguous_dir, corrupt_dir, trimming_dir):
         os.makedirs(d, exist_ok=True)
     normal_dataset(normal_dir)
     ambiguous_dataset(ambiguous_dir)
     corrupt_dataset(corrupt_dir, normal_dir)
+    trimming_dataset(trimming_dir)
     print(f"sample datasets written under {root}")
 
 

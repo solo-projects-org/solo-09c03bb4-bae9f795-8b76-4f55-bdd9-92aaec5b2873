@@ -19,3 +19,7 @@ class SampleSheetError(DemuxError):
 
 class BatchMismatchError(DemuxError):
     """Raised when the four lanes disagree on record count or read order."""
+
+
+class TrimmingError(DemuxError):
+    """Raised when an adapter-trimming attempt fails validation or cutadapt."""

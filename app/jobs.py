@@ -171,6 +171,11 @@ class JobManager:
         jobs.sort(key=lambda j: j.created_at, reverse=True)
         return [j.snapshot() for j in jobs]
 
+    def list_jobs_raw(self) -> list[Job]:
+        """Return the live Job objects (internal use, e.g. trim target listing)."""
+        with self._lock:
+            return list(self._jobs.values())
+
     # --- helpers --------------------------------------------------------
 
     @staticmethod

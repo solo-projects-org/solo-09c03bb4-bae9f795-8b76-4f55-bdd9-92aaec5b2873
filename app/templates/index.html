@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FASTQ 混样拆分</title>
+<title>FASTQ 混样拆分与接头清洗</title>
 <style>
   :root {
     --bg: #f5f7fa; --card: #fff; --line: #d9dee6; --text: #1f2933;
     --muted: #6b7280; --blue: #2563eb; --red: #dc2626; --green: #15803d;
-    --amber: #b45309;
+    --amber: #b45309; --purple: #7c3aed;
   }
   * { box-sizing: border-box; }
   body { margin: 0; font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -19,16 +19,23 @@
   main { max-width: 1080px; margin: 24px auto; padding: 0 20px; display: grid;
          grid-template-columns: 420px 1fr; gap: 20px; }
   @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .full { grid-column: 1 / -1; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
           padding: 20px; }
   .card h2 { margin: 0 0 14px; font-size: 16px; }
+  .card h3 { margin: 18px 0 8px; font-size: 14px; color: var(--purple); }
   label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 4px; }
-  input[type=file] { width: 100%; font-size: 13px; }
+  input[type=file], select, input[type=text], input[type=number] {
+    width: 100%; font-size: 13px; padding: 7px 9px; border: 1px solid var(--line);
+    border-radius: 7px; background: #fff; color: var(--text);
+  }
   .hint { font-size: 12px; color: var(--muted); margin-top: 2px; }
   button { cursor: pointer; border: 0; border-radius: 8px; padding: 9px 16px;
            font-size: 14px; font-weight: 600; }
   button.primary { background: var(--blue); color: #fff; width: 100%; margin-top: 18px; }
   button.primary:disabled { background: #93b4f5; cursor: not-allowed; }
+  button.purple { background: var(--purple); color: #fff; width: 100%; margin-top: 16px; }
+  button.purple:disabled { background: #c4b5fd; cursor: not-allowed; }
   button.danger { background: var(--red); color: #fff; padding: 5px 12px; font-size: 12px; }
   button.download { background: var(--green); color: #fff; padding: 5px 12px; font-size: 12px; }
   button:disabled { opacity: .55; cursor: not-allowed; }
@@ -38,21 +45,26 @@
   th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
   .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px;
            font-weight: 700; }
-  .badge.running { background: #dbeafe; color: #1d4ed8; }
+  .badge.running, .badge.queued { background: #dbeafe; color: #1d4ed8; }
   .badge.completed { background: #dcfce7; color: var(--green); }
   .badge.failed { background: #fee2e2; color: var(--red); }
   .badge.cancelled { background: #fef3c7; color: var(--amber); }
+  .badge.superseded { background: #ede9fe; color: var(--purple); }
   .error { color: var(--red); font-size: 12px; word-break: break-all; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-  #formMsg { margin-top: 10px; font-size: 13px; min-height: 18px; }
+  #formMsg, #trimMsg { margin-top: 10px; font-size: 13px; min-height: 18px; }
   .counts { font-size: 12px; color: #374151; }
   .empty { color: var(--muted); font-size: 13px; padding: 14px 4px; }
+  .params { font-size: 12px; color: #374151; }
+  .oldnote { font-size: 12px; color: var(--amber); margin-top: 4px; }
+  .oknote { font-size: 12px; color: var(--green); margin-top: 4px; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 </style>
 </head>
 <body>
 <header>
-  <h1>FASTQ 混样拆分服务</h1>
-  <p>上传 R1 / R2 / I1 / I2 四行制 FASTQ.gz 与 sample_id,i7,i5 样本表 · 最多 {{ max_parallel }} 批并行 · 状态仅存内存</p>
+  <h1>FASTQ 混样拆分与建库接头清洗服务</h1>
+  <p>上传四行制 FASTQ.gz 与样本表完成混样拆分，再对已完成批次的非空样本用 cutadapt（-j 2，默认匹配）清洗 3′ 接头 · 原拆分文件保留 · 状态仅存内存</p>
 </header>
 <main>
   <section class="card">
@@ -75,7 +87,7 @@
   </section>
 
   <section class="card">
-    <h2>作业列表 <span style="font-weight:400;color:var(--muted)">（每 2 秒自动刷新）</span></h2>
+    <h2>拆分作业列表 <span style="font-weight:400;color:var(--muted)">（每 2 秒自动刷新）</span></h2>
     <table>
       <thead>
         <tr><th>作业 ID</th><th>状态</th><th>进度 / 分配数</th><th>操作</th></tr>
@@ -85,6 +97,43 @@
       </tbody>
     </table>
   </section>
+
+  <section class="card full">
+    <h2>建库接头清洗（cutadapt）</h2>
+    <div style="display:grid;grid-template-columns:380px 1fr;gap:24px;" id="trimGrid">
+      <div>
+        <form id="trimForm">
+          <label>选择样本（仅列出已完成批次的非空样本）</label>
+          <select name="target" id="trimTarget" required>
+            <option value="">— 请先完成一个拆分批次 —</option>
+          </select>
+          <p class="hint">原拆分 R1/R2 文件只读保留；清洗产生全新的双端文件与 ZIP。</p>
+          <label>R1 的 3′ 接头序列（-a）</label>
+          <input type="text" name="adapter_r1" id="adapterR1" placeholder="如 AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"
+                 pattern="[ACGTNacgtnRYSWKMBDHV]{1,100}" required>
+          <label>R2 的 3′ 接头序列（-A）</label>
+          <input type="text" name="adapter_r2" id="adapterR2" placeholder="如 AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"
+                 pattern="[ACGTNacgtnRYSWKMBDHV]{1,100}" required>
+          <label>最短长度（-m，任一端短于该值则整对丢弃）</label>
+          <input type="number" name="min_length" id="minLength" value="15" min="1" max="1000000" required>
+          <p class="hint">cutadapt -j 2，默认错误率/重叠匹配规则，--pair-filter=any。同样本重提参数会取代运行中的清洗。</p>
+          <button class="purple" type="submit" id="trimSubmitBtn">提交清洗参数</button>
+        </form>
+        <div id="trimMsg"></div>
+      </div>
+      <div>
+        <h3>清洗尝试（每 2 秒自动刷新）</h3>
+        <table>
+          <thead>
+            <tr><th>样本 / 尝试</th><th>状态</th><th>参数与读数</th><th>操作</th></tr>
+          </thead>
+          <tbody id="trimRows">
+            <tr><td colspan="4" class="empty">暂无清洗尝试</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
 </main>
 
 <script>
@@ -92,13 +141,17 @@ const form = document.getElementById('jobForm');
 const formMsg = document.getElementById('formMsg');
 const submitBtn = document.getElementById('submitBtn');
 const jobRows = document.getElementById('jobRows');
+const trimForm = document.getElementById('trimForm');
+const trimMsg = document.getElementById('trimMsg');
+const trimSubmitBtn = document.getElementById('trimSubmitBtn');
+const trimTarget = document.getElementById('trimTarget');
+const trimRows = document.getElementById('trimRows');
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => (
     {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
-
-function shortId(id) { return id.slice(0, 8); }
+function shortId(id) { return id ? id.slice(0, 8) : ''; }
 
 function countsText(job) {
   if (job.status === 'running') {
@@ -113,7 +166,7 @@ function countsText(job) {
   return '<div class="counts">-</div>';
 }
 
-function render(jobs) {
+function renderJobs(jobs) {
   if (!jobs.length) {
     jobRows.innerHTML = '<tr><td colspan="4" class="empty">暂无作业</td></tr>';
     return;
@@ -124,7 +177,7 @@ function render(jobs) {
       actions.push(`<button class="danger" onclick="cancelJob('${job.id}', this)">取消</button>`);
     }
     if (job.download_available) {
-      actions.push(`<button class="download" onclick="location.href='/api/jobs/${job.id}/download'">下载 ZIP</button>`);
+      actions.push(`<button class="download" onclick="location.href='/api/jobs/${job.id}/download'">下载拆分 ZIP</button>`);
     }
     const errLine = job.error ? `<div class="error">${esc(job.error)}</div>` : '';
     return `<tr>
@@ -137,11 +190,73 @@ function render(jobs) {
   }).join('');
 }
 
+// ------------------------------------------------------------- trimming
+
+function paramsText(p) {
+  if (!p) return '';
+  return `<div class="params mono">-a ${esc(p.adapter_r1)}<br>-A ${esc(p.adapter_r2)}<br>-m ${esc(p.min_length)}</div>`;
+}
+
+function renderTargets(targets) {
+  const previous = trimTarget.value;
+  if (!targets.length) {
+    trimTarget.innerHTML = '<option value="">— 请先完成一个拆分批次 —</option>';
+    return;
+  }
+  trimTarget.innerHTML = targets.map(t =>
+    `<option value="${esc(t.target_id)}">批次 ${shortId(t.job_id)} · 样本 ${esc(t.sample_id)}（${t.read_count} 对）</option>`
+  ).join('');
+  if (previous && targets.some(t => t.target_id === previous)) {
+    trimTarget.value = previous;
+  }
+}
+
+function renderAttempts(attempts) {
+  if (!attempts.length) {
+    trimRows.innerHTML = '<tr><td colspan="4" class="empty">暂无清洗尝试</td></tr>';
+    return;
+  }
+  trimRows.innerHTML = attempts.map(a => {
+    const actions = [];
+    if (a.status === 'running' || a.status === 'queued') {
+      actions.push(`<button class="danger" onclick="cancelTrim('${a.id}', this)">取消</button>`);
+    }
+    if (a.download_available) {
+      actions.push(`<button class="download" onclick="location.href='/api/trimming/${a.id}/download'">下载清洗 ZIP</button>`);
+    }
+    const errLine = a.error ? `<div class="error">${esc(a.error)}</div>` : '';
+    // New parameters that never took effect: the old package stays active.
+    const ineffective = ['failed', 'cancelled', 'superseded'].includes(a.status);
+    let oldNote = '';
+    if (ineffective && a.active_published) {
+      const p = a.active_published.params;
+      oldNote = `<div class="oldnote">⚠ 新参数未生效，仍发布旧包（尝试 ${shortId(a.active_published.attempt_id)}）：
+        <span class="mono">-a ${esc(p.adapter_r1)} · -A ${esc(p.adapter_r2)} · -m ${esc(p.min_length)}</span></div>`;
+    } else if (ineffective) {
+      oldNote = `<div class="oldnote">⚠ 本次参数未生效，无已发布清洗包</div>`;
+    }
+    const statLine = a.pairs_in != null
+      ? `<div class="counts">输入 ${a.pairs_in} 对 → 保留 ${a.pairs_out} 对（丢弃 ${Math.max(0, a.pairs_in - a.pairs_out)} 对）</div>`
+      : '<div class="counts">等待 cutadapt 统计…</div>';
+    return `<tr>
+      <td class="mono">${esc(a.sample_id)}<br>
+        <span style="color:var(--muted)">批次 ${shortId(a.job_id)} · 尝试 ${shortId(a.id)}</span></td>
+      <td><span class="badge ${a.status}">${a.status}</span>${errLine}
+          ${a.published ? '<div class="oknote">✓ 当前发布版本</div>' : ''}${oldNote}</td>
+      <td>${paramsText(a.params)}${statLine}</td>
+      <td>${actions.join(' ') || '<span style="color:var(--muted)">-</span>'}</td>
+    </tr>`;
+  }).join('');
+}
+
 async function refresh() {
   try {
-    const resp = await fetch('/api/jobs');
-    const data = await resp.json();
-    render(data.jobs);
+    const [jobsResp, targetsResp, trimResp] = await Promise.all([
+      fetch('/api/jobs'), fetch('/api/trimming/targets'), fetch('/api/trimming')
+    ]);
+    renderJobs((await jobsResp.json()).jobs);
+    renderTargets((await targetsResp.json()).targets);
+    renderAttempts((await trimResp.json()).attempts);
   } catch (e) { /* keep last rendered state */ }
 }
 
@@ -171,11 +286,63 @@ form.addEventListener('submit', async (ev) => {
   }
 });
 
+trimForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const targetVal = trimTarget.value;
+  if (!targetVal) {
+    trimMsg.textContent = '请先选择一个已完成批次的非空样本';
+    trimMsg.style.color = 'var(--red)';
+    return;
+  }
+  const [job_id, sample_id] = targetVal.split(':');
+  trimSubmitBtn.disabled = true;
+  trimMsg.textContent = '提交中…';
+  trimMsg.style.color = 'var(--muted)';
+  try {
+    const body = new URLSearchParams({
+      job_id, sample_id,
+      adapter_r1: document.getElementById('adapterR1').value.trim(),
+      adapter_r2: document.getElementById('adapterR2').value.trim(),
+      min_length: document.getElementById('minLength').value
+    });
+    const resp = await fetch('/api/trimming', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      trimMsg.textContent = `被拒绝：${data.detail || resp.status}`;
+      trimMsg.style.color = 'var(--red)';
+    } else {
+      trimMsg.textContent = `清洗尝试 ${shortId(data.id)} 已受理，同一样本的旧尝试将被取代`;
+      trimMsg.style.color = 'var(--green)';
+    }
+  } catch (e) {
+    trimMsg.textContent = `请求失败：${e}`;
+    trimMsg.style.color = 'var(--red)';
+  } finally {
+    trimSubmitBtn.disabled = false;
+    refresh();
+  }
+});
+
 window.cancelJob = async function(id, btn) {
   btn.disabled = true;
   btn.textContent = '取消中…';
   try {
     const resp = await fetch(`/api/jobs/${id}/cancel`, { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) { alert(data.detail || '取消失败'); btn.disabled = false; btn.textContent = '取消'; }
+  } catch (e) { alert(`取消失败：${e}`); btn.disabled = false; btn.textContent = '取消'; }
+  refresh();
+};
+
+window.cancelTrim = async function(id, btn) {
+  btn.disabled = true;
+  btn.textContent = '取消中…';
+  try {
+    const resp = await fetch(`/api/trimming/${id}/cancel`, { method: 'POST' });
     const data = await resp.json();
     if (!resp.ok) { alert(data.detail || '取消失败'); btn.disabled = false; btn.textContent = '取消'; }
   } catch (e) { alert(`取消失败：${e}`); btn.disabled = false; btn.textContent = '取消'; }
